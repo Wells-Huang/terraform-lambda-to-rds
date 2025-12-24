@@ -22,6 +22,8 @@ data "aws_availability_zones" "available" {
 # --- 1. 網路設定 (VPC) ---
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
   tags = {
     Name = "rds-lambda-example-vpc"
   }
@@ -45,6 +47,16 @@ resource "aws_db_subnet_group" "rds_subnet_group" {
   }
 }
 
+# VPC Endpoint for Secrets Manager
+resource "aws_vpc_endpoint" "secretsmanager" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.lambda.id]
+  private_dns_enabled = true
+}
+
 # --- 2. 安全群組 ---
 resource "aws_security_group" "rds" {
   name        = "rds-sg"
@@ -56,6 +68,13 @@ resource "aws_security_group" "lambda" {
   name        = "lambda-sg"
   vpc_id      = aws_vpc.main.id
   description = "Allow traffic from Lambda"
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
 
   egress {
     from_port   = 0
@@ -76,7 +95,7 @@ resource "aws_security_group_rule" "lambda_to_rds" {
 
 # --- 3. Secrets Manager: 儲存 RDS 密碼 ---
 resource "aws_secretsmanager_secret" "rds_credentials" {
-  name = "rds-db-credentials"
+  name = "rds-credentials"
 }
 
 resource "aws_secretsmanager_secret_version" "rds_credentials_version" {
@@ -104,7 +123,7 @@ resource "aws_db_instance" "main" {
 # --- 5. IAM 角色與政策 ---
 # 應用程式 Lambda 的角色
 resource "aws_iam_role" "lambda_exec_role" {
-  name = "lambda-exec-role"
+  name = "lambda-execution-role"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17",
     Statement = [{
@@ -161,6 +180,7 @@ resource "aws_lambda_function" "db_accessor" {
   runtime       = "python3.12"
   filename      = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  timeout       = 30
 
   layers = [aws_lambda_layer_version.psycopg2.arn]
 
