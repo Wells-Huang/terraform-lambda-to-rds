@@ -147,13 +147,22 @@ data "archive_file" "lambda_zip" {
   output_path = "${path.module}/lambda.zip"
 }
 
+resource "aws_lambda_layer_version" "psycopg2" {
+  filename   = "${path.module}/psycopg2-layer/psycopg2-layer.zip"
+  layer_name = "psycopg2-layer"
+
+  compatible_runtimes = ["python3.12"]
+}
+
 resource "aws_lambda_function" "db_accessor" {
   function_name = "RDSAccessor"
   role          = aws_iam_role.lambda_exec_role.arn
-  handler       = "app.lambda_handler"
-  runtime       = "python3.9"
+  handler       = "func.lambda_handler"
+  runtime       = "python3.12"
   filename      = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  layers = [aws_lambda_layer_version.psycopg2.arn]
 
   vpc_config {
     subnet_ids         = aws_subnet.private[*].id
