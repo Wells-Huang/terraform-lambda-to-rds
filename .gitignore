@@ -1,0 +1,17 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Project Specific
+lambda.zip
