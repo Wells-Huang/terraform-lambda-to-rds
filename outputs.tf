@@ -9,3 +9,7 @@ output "rds_endpoint" {
 output "secret_name" {
   value = aws_secretsmanager_secret.rds_credentials.name
 }
+
+output "app_secret_arn" {
+  value = aws_secretsmanager_secret.app_db_credentials.arn
+}

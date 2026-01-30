@@ -2,20 +2,31 @@
 利用Terraform透過main.tf部署Lambda, RDS database (Postgress), 以及相關元件
 接著透過aws指令或Lambda test function確認Lambda與資料庫的連接成功
 
-## 2026-01-08 重大更新：資料庫憑證自動輪換 (Credential Rotation)
+## 2026-01-30 重大更新：交替使用者輪換 (Alternating Users Rotation)
 
-本專案已實作 AWS Secrets Manager 自動輪換功能，以提升資料庫安全性。
+本專案已升級 AWS Secrets Manager 輪換策略，採用「交替使用者」模式，以確保資料庫憑證在輪換期間**零停機 (Zero Downtime)**。
 
-### 1. 更新概要
-*   **Admin User (RDS 擁有者)**：啟用單一使用者輪換 (Single User Rotation)。Secrets Manager 會直接修改 Admin 的密碼。
-*   **App User (應用程式使用者)**：啟用多使用者輪換 (Multi User Rotation)。
-    *   新增 `app_user` 專用 Secret (`app-db-credentials`)。
-    *   Rotation Lambda 使用 Admin 憑證 (Master Secret) 登入，並修改 `app_user` 的密碼。
-    *   應用程式 (`RDSAccessor`) 改為讀取 `app-db-credentials` 來連線。
-*   **基礎設施變更**：
-    *   新增 `RDSAdmin` Lambda：用於在私有子網內執行 SQL 初始化腳本。
-    *   新增 `postgres-rotation` Lambda：自訂 Python 腳本執行密碼輪換邏輯。
-    *   解開 Terraform 資源間的循環依賴 (DB vs Secret)。
+### 1. 設計目標與原理
+
+#### 目標
+解決舊有「單一使用者輪換」在更改密碼瞬間會造成既有連線中斷的問題。我們的目標是提供一個「緩衝期」，確保新舊密碼在輪換期間同時有效。
+
+#### 做法 (How it works)
+系統維護兩個資料庫使用者帳號：`app_user` 與 `app_user_clone`。Secret (`app-db-credentials`) 會在這兩個使用者之間輪流切換。
+
+**輪換流程範例：**
+1.  **初始狀態**：Secret 指向 `app_user` (密碼 A)。應用程式連線中。
+2.  **觸發輪換**：
+    *   系統選定閒置的 `app_user_clone`。
+    *   系統將 `app_user_clone` 的密碼更新為新亂數密碼 (密碼 B)。
+    *   Secret 更新指向 `app_user_clone` (密碼 B)。
+3.  **緩衝期 (關鍵)**：
+    *   **新連線**：讀取 Secret 取得 `app_user_clone` (密碼 B)，連線成功。
+    *   **舊連線**：仍持有 `app_user` (密碼 A) 的應用程式**不會斷線**，因為我們沒有動 `app_user` 的密碼。
+4.  **下一次輪換**：
+    *   系統選定現在變成舊帳號的 `app_user`。
+    *   更新 `app_user` 為新密碼 (密碼 C)。
+    *   Secret 切換回 `app_user`。此時原本的密碼 A 才會失效。
 
 ### 2. 部署與初始化步驟
 
@@ -28,46 +39,48 @@
     ```
 
 2.  **【關鍵步驟】初始化應用程式使用者**
-    由於 Terraform 無法直接登入資料庫建立使用者，部署後必須手動執行一次初始化指令。
-    此指令會呼叫 `RDSAdmin` Lambda 執行 `sql/init_app_user.sql`，建立 `app_user` 並賦予連線權限。
+    部署後必須執行此初始化指令，它會同時建立 `app_user` 和 `app_user_clone` 兩個使用者。
+    *(因為 AWS 沒有提供直接建立 DB User 的 API，我們透過 Lambda 執行 SQL)*
 
     ```bash
-    aws lambda invoke --function-name RDSAdmin --payload '{"sql_file": "init_app_user.sql"}' --cli-binary-format raw-in-base64-out response_init.json
+    # 使用 payload.json 避免 Windows CLI 引號問題
+    echo '{"sql_file": "init_app_user.sql"}' > payload.json
+    aws lambda invoke --function-name RDSAdmin --payload file://payload.json --cli-binary-format raw-in-base64-out response_init.json
     ```
     *檢查 `response_init.json` 確認回傳 "Successfully executed..."*
 
-### 3. 驗證步驟
+### 3. 驗證方式 (Verification)
 
-#### 3.1 驗證應用程式連線
-確認 `RDSAccessor` 能使用新的 `app_user` 憑證連線：
+您可以透過以下步驟驗證「交替使用者」機制是否正常運作。
+
+#### 3.1 準備工作
+取得 App User 的 Secret 名稱 (例如 `app-db-credentials-xxxx`)：
 ```bash
-aws lambda invoke --function-name RDSAccessor response_test.json
-cat response_test.json
+export SECRET_NAME=$(aws secretsmanager list-secrets --query "SecretList[?starts_with(Name, 'app-db-credentials')].Name" --output text)
+echo $SECRET_NAME
 ```
 
-#### 3.2 驗證憑證輪換 (Credential Rotation)
-
-**取得 Secret 名稱**：
+#### 3.2 驗證初始狀態
+讀取目前的 Secret，確認目前指向的使用者 (預設應為 `app_user`)：
 ```bash
-aws secretsmanager list-secrets --query "SecretList[*].Name" --output table | grep credentials
-```
-(記下 `rds-credentials-xxxx` 和 `app-db-credentials-xxxx` 的完整名稱)
-
-**測試 Admin 輪換**：
-```bash
-aws secretsmanager rotate-secret --secret-id <Admin_Secret_Name>
+aws secretsmanager get-secret-value --secret-id $SECRET_NAME --query SecretString --output text
 ```
 
-**測試 App User 輪換**：
+#### 3.3 觸發輪換 (Trigger Rotation)
+手動觸發立即輪換：
 ```bash
-aws secretsmanager rotate-secret --secret-id <App_User_Secret_Name>
+aws secretsmanager rotate-secret --secret-id $SECRET_NAME
 ```
 
-**檢查輪換狀態**：
+#### 3.4 驗證交替結果
+等待約 10-20 秒後，再次讀取 Secret，確認使用者名稱是否已自動切換為 **`app_user_clone`**：
 ```bash
-aws secretsmanager describe-secret --secret-id <Secret_Name>
+aws secretsmanager get-secret-value --secret-id $SECRET_NAME --query SecretString --output text
 ```
-確認 `LastRotatedDate` 已更新至最新時間。
+> **預期結果**：您應該會看到 `"username": "app_user_clone"`。這證明了系統成功保留了舊使用者，並啟用了新使用者接手連線。
+
+#### 3.5 (進階) 驗證舊憑證仍有效
+為了確認零停機，您可以嘗試使用步驟 3.2 取得的「舊帳號密碼」連線資料庫。若輪換設計正確，舊帳號（在此例中為 `app_user`）此刻應該仍然可以登入。
 
 ## 驗證完成後的清理
 驗證成功後，執行 terraform destroy可以清除已經建立的所有元件

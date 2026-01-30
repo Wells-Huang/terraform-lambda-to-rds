@@ -3,15 +3,23 @@
 -- After the first rotation, this password will no longer be valid, and the application should retrieve the password from Secrets Manager.
 CREATE USER app_user WITH PASSWORD 'InitialPassword123!';
 
+-- Alternating User Strategy: Create the clone user
+-- This user will be used during the rotation to ensure zero downtime.
+CREATE USER app_user_clone WITH PASSWORD 'InitialPassword123!';
+
 -- Grant connection permissions
 GRANT CONNECT ON DATABASE postgres TO app_user;
+GRANT CONNECT ON DATABASE postgres TO app_user_clone;
 
 -- Grant usage on public schema
 GRANT USAGE ON SCHEMA public TO app_user;
+GRANT USAGE ON SCHEMA public TO app_user_clone;
 
 -- Grant select permissions on all tables in public schema
 -- You may want to refine these permissions based on your specific security requirements
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_user_clone;
 
 -- Optional: Ensure future tables are also readable
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO app_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO app_user_clone;

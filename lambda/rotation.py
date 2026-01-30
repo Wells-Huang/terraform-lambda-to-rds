@@ -73,7 +73,7 @@ def rotation_handler(event, context, strategy):
         raise ValueError(f"Secret version {token} not set as AWSPENDING for rotation of secret {arn}")
 
     if step == "createSecret":
-        create_secret(client, arn, token)
+        create_secret(client, arn, token, strategy)
     elif step == "setSecret":
         if strategy == "single":
             set_secret_single(client, arn, token)
@@ -86,7 +86,7 @@ def rotation_handler(event, context, strategy):
     else:
         raise ValueError(f"Invalid step parameter {step} for secret {arn}")
 
-def create_secret(client, arn, token):
+def create_secret(client, arn, token, strategy="single"):
     """Creates the AWSPENDING secret if it doesn't exist."""
     # Ensure current exists
     get_secret_dict(client, arn, "AWSCURRENT")
@@ -107,6 +107,22 @@ def create_secret(client, arn, token):
         )['RandomPassword']
         
         current_dict['password'] = passwd
+
+        # Strategy Specific Logic
+        if strategy == "multi":
+            # Toggle username for Alternating Users strategy
+            current_user = current_dict.get('username')
+            if current_user == 'app_user':
+                current_dict['username'] = 'app_user_clone'
+                logger.info("createSecret: Toggling username from app_user to app_user_clone")
+            elif current_user == 'app_user_clone':
+                current_dict['username'] = 'app_user'
+                logger.info("createSecret: Toggling username from app_user_clone to app_user")
+            else:
+                # Fallback or error if username is unexpected? 
+                # For safety, let's assume if it's not one, we might want to default or log a warning.
+                # Here we assume it's one of them. If initial is app_user, it mimics that.
+                pass
         
         client.put_secret_value(
             SecretId=arn,
